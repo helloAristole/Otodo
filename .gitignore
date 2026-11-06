@@ -1,0 +1,42 @@
+# Project / IDE data
+.codebuddy/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node / front-end
+node_modules/
+dist/
+build/
+.vite/
+vite.log
+vite.err
+tauri.log
+
+# Env / secrets
+.env
+.env.*
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust / Tauri
+/src-tauri/target/
+/src-tauri/gen/
+
+# 本地构建 / 临时脚本（Bug 11：避免 untracked 垃圾）
+_build*.bat
+_build*.log
+_check*.log
+_do_build.bat
+_run.bat
+_tauri*.log
+_vite*.log
+*.err
