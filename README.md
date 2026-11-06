@@ -4,7 +4,7 @@
 
 Otodo 将日历和待办放在桌面上，方便快速查看日程、记录任务和保持专注。应用无需连接后端，数据仅保存在本机。
 
-![Otodo 周视图](doc/image-1.png)
+![1793954864016](https://typora-1327413317.cos.ap-guangzhou.myqcloud.com/typora/2026/11/1793954864873-d3cf885e.png)
 
 ## 功能特点
 
