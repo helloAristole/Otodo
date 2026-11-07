@@ -1,10 +1,15 @@
 # Otodo
 
+[![Release](https://img.shields.io/github/v/release/helloAristole/Otodo?label=版本)](https://github.com/helloAristole/Otodo/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/helloAristole/Otodo/total?label=下载)](https://github.com/helloAristole/Otodo/releases)
+[![License](https://img.shields.io/github/license/helloAristole/Otodo?label=许可证)](LICENSE)
+![Platform](https://img.shields.io/badge/平台-Windows-0078D4)
+
 一款轻量、透明、始终在手边的 Windows 日历待办应用。
 
 Otodo 将日历和待办放在桌面上，方便快速查看日程、记录任务和保持专注。应用无需连接后端，数据仅保存在本机。
 
-![1793954864016](https://typora-1327413317.cos.ap-guangzhou.myqcloud.com/typora/2026/11/1793954864873-d3cf885e.png)
+![Otodo 周视图](doc/image-1.png)
 
 ## 功能特点
 
@@ -19,7 +24,7 @@ Otodo 将日历和待办放在桌面上，方便快速查看日程、记录任�
 
 ## 下载
 
-[下载最新版](https://github.com/helloAristole/Otodo/releases/latest)
+[![下载最新版](https://img.shields.io/badge/下载最新版-Windows_x64-2F80ED?style=for-the-badge&logo=windows)](https://github.com/helloAristole/Otodo/releases/latest)
 
 当前版本：[`v0.1.21`](https://github.com/helloAristole/Otodo/releases/tag/v0.1.21)
 
@@ -65,3 +70,14 @@ npm run tauri build
 - Tauri 2
 - Rust
 - SQLite
+
+## 参与项目
+
+- 发现问题：[提交 Bug](https://github.com/helloAristole/Otodo/issues/new?template=bug_report.yml)
+- 提出建议：[提交功能建议](https://github.com/helloAristole/Otodo/issues/new?template=feature_request.yml)
+- 了解计划：[查看 Roadmap](ROADMAP.md)
+- 贡献代码：[阅读贡献指南](CONTRIBUTING.md)
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。

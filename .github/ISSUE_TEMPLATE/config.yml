@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 下载最新版
+    url: https://github.com/helloAristole/Otodo/releases/latest
+    about: 安装或升级 Otodo
