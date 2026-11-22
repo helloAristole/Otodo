@@ -26,9 +26,9 @@ Otodo 将日历和待办放在桌面上，方便快速查看日程、记录任�
 
 [![下载最新版](https://img.shields.io/badge/下载最新版-Windows_x64-2F80ED?style=for-the-badge&logo=windows)](https://github.com/helloAristole/Otodo/releases/latest)
 
-当前版本：[`v0.1.21`](https://github.com/helloAristole/Otodo/releases/tag/v0.1.21)
+当前版本：[`v0.1.22`](https://github.com/helloAristole/Otodo/releases/tag/v0.1.22)
 
-- [下载 Windows x64 安装程序（EXE）](https://github.com/helloAristole/Otodo/releases/download/v0.1.21/Otodo_0.1.21_x64-setup.exe)
+- [下载 Windows x64 安装程序（EXE）](https://github.com/helloAristole/Otodo/releases/download/v0.1.22/Otodo_0.1.22_x64-setup.exe)
 
 目前仅提供 Windows 版本。
 
