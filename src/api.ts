@@ -9,6 +9,14 @@ export const IS_TAURI =
 
 const LS_KEY = "otodo.todos";
 
+export type TodoOrder = { id: string; sort_order: number };
+export type TodoDateUpdate = {
+  id: string;
+  due_at: string | null;
+  due_date: string | null;
+  all_day: boolean;
+};
+
 function normalize(t: any): Todo {
   return {
     id: t.id,
@@ -104,8 +112,26 @@ async function deleteTodoTauri(id: string): Promise<void> {
   await invoke("delete_todo", { id });
 }
 
-async function reorderTodosTauri(orders: { id: string; sort_order: number }[]): Promise<void> {
+async function restoreTodoTauri(id: string): Promise<void> {
+  await invoke("restore_todo", { id });
+}
+
+async function reorderTodosTauri(orders: TodoOrder[]): Promise<void> {
   await invoke("reorder_todos", { orders });
+}
+
+async function moveTodoTauri(update: TodoDateUpdate, orders: TodoOrder[]): Promise<void> {
+  await invoke("move_todo", {
+    id: update.id,
+    dueAt: update.due_at,
+    dueDate: update.due_date,
+    allDay: update.all_day,
+    orders,
+  });
+}
+
+async function rollOverTodosTauri(moves: TodoDateUpdate[]): Promise<void> {
+  await invoke("roll_over_todos", { moves });
 }
 
 // ===== 浏览器 localStorage 兜底（仅开发预览，不联网）=====
@@ -136,7 +162,7 @@ async function addTodoLocal(payload: any): Promise<string> {
 async function toggleTodoLocal(id: string, done: boolean, day?: string): Promise<void> {
   const list = loadLocal();
   const t = list.find((x) => x.id === id);
-  if (!t) return;
+  if (!t) throw new Error(`待办不存在：${id}`);
   if (t.repeat && t.repeat !== "none" && day) {
     const set = t.done_dates ? t.done_dates.split(" ").filter(Boolean) : [];
     if (done) {
@@ -154,21 +180,95 @@ async function toggleTodoLocal(id: string, done: boolean, day?: string): Promise
 async function updateTodoLocal(id: string, patch: Record<string, unknown>): Promise<void> {
   const list = loadLocal();
   const t = list.find((x) => x.id === id);
-  if (!t) return;
+  if (!t) throw new Error(`待办不存在：${id}`);
+  validateLocalPatch(patch);
   Object.assign(t, patch);
   saveLocal(list);
 }
 async function deleteTodoLocal(id: string): Promise<void> {
   const list = loadLocal();
   const t = list.find((x) => x.id === id);
-  if (t) t.deleted = true;
+  if (!t) throw new Error(`待办不存在：${id}`);
+  t.deleted = true;
   saveLocal(list);
 }
-async function reorderTodosLocal(orders: { id: string; sort_order: number }[]): Promise<void> {
+async function restoreTodoLocal(id: string): Promise<void> {
   const list = loadLocal();
+  const todo = list.find((item) => item.id === id);
+  if (!todo) throw new Error(`待办不存在：${id}`);
+  if (!todo.deleted) throw new Error(`待办 ${id} 未处于删除状态`);
+  todo.deleted = false;
+  saveLocal(list);
+}
+async function reorderTodosLocal(orders: TodoOrder[]): Promise<void> {
+  const list = loadLocal();
+  ensureLocalTodosExist(list, orders.map((order) => order.id));
   const map = new Map(orders.map((o) => [o.id, o.sort_order]));
   for (const t of list) if (map.has(t.id)) t.sort_order = map.get(t.id)!;
   saveLocal(list);
+}
+
+async function moveTodoLocal(update: TodoDateUpdate, orders: TodoOrder[]): Promise<void> {
+  const list = loadLocal();
+  ensureLocalTodosExist(list, [update.id, ...orders.map((order) => order.id)]);
+  const moved = list.find((todo) => todo.id === update.id)!;
+  moved.due_at = update.due_at;
+  moved.due_date = update.due_date;
+  moved.all_day = update.all_day;
+  const orderById = new Map(orders.map((order) => [order.id, order.sort_order]));
+  for (const todo of list) {
+    const sortOrder = orderById.get(todo.id);
+    if (sortOrder !== undefined) todo.sort_order = sortOrder;
+  }
+  saveLocal(list);
+}
+
+async function rollOverTodosLocal(moves: TodoDateUpdate[]): Promise<void> {
+  const list = loadLocal();
+  ensureLocalTodosExist(list, moves.map((move) => move.id));
+  const moveById = new Map(moves.map((move) => [move.id, move]));
+  for (const todo of list) {
+    const move = moveById.get(todo.id);
+    if (!move) continue;
+    todo.due_at = move.due_at;
+    todo.due_date = move.due_date;
+    todo.all_day = move.all_day;
+  }
+  saveLocal(list);
+}
+
+function ensureLocalTodosExist(list: Todo[], ids: string[]): void {
+  const existingIds = new Set(list.map((todo) => todo.id));
+  const missingId = ids.find((id) => !existingIds.has(id));
+  if (missingId) throw new Error(`待办不存在：${missingId}`);
+}
+
+function validateLocalPatch(patch: Record<string, unknown>): void {
+  const nullableTextFields = new Set(["note", "due_at", "due_date", "repeat_until", "skip_dates"]);
+  const textFields = new Set(["title", "repeat", "done_dates"]);
+  const booleanFields = new Set(["all_day", "done"]);
+
+  for (const [key, value] of Object.entries(patch)) {
+    if (nullableTextFields.has(key)) {
+      if (value !== null && typeof value !== "string") {
+        throw new Error(`字段 ${key} 必须是字符串或 null`);
+      }
+      continue;
+    }
+    if (textFields.has(key)) {
+      if (typeof value !== "string") throw new Error(`字段 ${key} 必须是字符串且不能为 null`);
+      continue;
+    }
+    if (booleanFields.has(key)) {
+      if (typeof value !== "boolean") throw new Error(`字段 ${key} 必须是布尔值且不能为 null`);
+      continue;
+    }
+    if (key === "sort_order") {
+      if (!Number.isInteger(value)) throw new Error("字段 sort_order 必须是整数且不能为 null");
+      continue;
+    }
+    throw new Error(`不支持的更新字段：${key}`);
+  }
 }
 
 // ===== 导出：按运行环境分派 =====
@@ -176,6 +276,12 @@ export const initDb = (): Promise<void> => {
   if (IS_TAURI) return invoke("init_db");
   seedIfEmpty();
   return Promise.resolve();
+};
+
+/** 只读返回本地数据目录，供启动失败时定位数据库与备份。 */
+export const getDataDir = (): Promise<string> => {
+  if (IS_TAURI) return invoke("get_data_dir");
+  return Promise.resolve("浏览器本地存储（localStorage）");
 };
 
 export const getTodos = (): Promise<Todo[]> => {
@@ -209,7 +315,8 @@ export const updateTodo = (
     due_at?: string | null;
     due_date?: string | null;
     all_day?: boolean;
-    note?: string;
+    note?: string | null;
+    done?: boolean;
     repeat?: RepeatVal;
     sort_order?: number;
     done_dates?: string;
@@ -226,11 +333,31 @@ export const deleteTodo = (id: string): Promise<void> => {
   return deleteTodoLocal(id);
 };
 
+export const restoreTodo = (id: string): Promise<void> => {
+  if (IS_TAURI) return restoreTodoTauri(id);
+  return restoreTodoLocal(id);
+};
+
 export const reorderTodos = (
-  orders: { id: string; sort_order: number }[]
+  orders: TodoOrder[]
 ): Promise<void> => {
   if (IS_TAURI) return reorderTodosTauri(orders);
   return reorderTodosLocal(orders);
+};
+
+/** 跨天移动与目标列排序在一次写入中完成。 */
+export const moveTodo = (
+  update: TodoDateUpdate,
+  orders: TodoOrder[]
+): Promise<void> => {
+  if (IS_TAURI) return moveTodoTauri(update, orders);
+  return moveTodoLocal(update, orders);
+};
+
+/** 批量顺延在一次写入中完成，任一待办失败则全部保持原状。 */
+export const rollOverTodos = (moves: TodoDateUpdate[]): Promise<void> => {
+  if (IS_TAURI) return rollOverTodosTauri(moves);
+  return rollOverTodosLocal(moves);
 };
 
 // 关闭窗口到托盘（不退出，真正退出仅由托盘「退出」完成）
@@ -252,6 +379,7 @@ export type PomoSnap = {
   rounds_today: number;
   focus_min?: number;
   break_min?: number;
+  revision: number;
 };
 
 export const IDLE_POMO: PomoSnap = {
@@ -261,6 +389,15 @@ export const IDLE_POMO: PomoSnap = {
   rounds_today: 0,
   focus_min: 25,
   break_min: 5,
+  revision: 0,
+};
+
+export const sendDueNotification = (
+  title: string,
+  body: string,
+): Promise<void> => {
+  if (IS_TAURI) return invoke("send_due_notification", { title, body });
+  return Promise.resolve();
 };
 
 export const getPomodoro = (): Promise<PomoSnap> => {

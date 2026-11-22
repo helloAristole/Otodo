@@ -1,6 +1,6 @@
 [package]
 name = "otodo"
-version = "0.1.21"
+version = "0.1.22"
 description = "Otodo - 桌面日历待办"
 edition = "2021"
 
@@ -18,7 +18,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 uuid = { version = "1", features = ["v4"] }
 window-vibrancy = "0.6"
 tauri-plugin-autostart = "2"

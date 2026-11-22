@@ -14,32 +14,89 @@ jobs:
 
     steps:
       - name: Checkout source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "lts/*"
           cache: npm
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Rust build
-        uses: swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           workspaces: "./src-tauri -> target"
 
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@v1
+      - name: Test frontend
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check release version and tag
+        shell: pwsh
+        run: node scripts/check-version.mjs --tag $env:GITHUB_REF_NAME
+
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Check Rust formatting
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Lint Rust
+        working-directory: src-tauri
+        run: cargo clippy --locked -- -D warnings
+
+      - name: Build draft release
+        uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Otodo ${{ github.ref_name }}"
           releaseBody: "Windows 安装包请从下方 Assets 下载。"
-          releaseDraft: false
+          releaseDraft: true
           prerelease: false
+          args: "-- --locked"
+
+      - name: Generate and validate Windows checksums
+        shell: pwsh
+        run: |
+          $bundleRoot = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/release/bundle"
+          $checksumPath = Join-Path $bundleRoot "SHA256SUMS.txt"
+          ./scripts/create-release-checksums.ps1 `
+            -BundleRoot $bundleRoot `
+            -OutputPath $checksumPath
+
+      - name: Upload Windows checksums
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $bundleRoot = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/release/bundle"
+          $checksumPath = Join-Path $bundleRoot "SHA256SUMS.txt"
+          if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
+            throw "校验和文件不存在，停止上传：$checksumPath"
+          }
+          gh release upload `
+            --repo $env:REPOSITORY `
+            $env:GITHUB_REF_NAME `
+            $checksumPath `
+            --clobber
+
+      - name: Publish validated release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          gh release edit `
+            --repo $env:REPOSITORY `
+            $env:GITHUB_REF_NAME `
+            --draft=false

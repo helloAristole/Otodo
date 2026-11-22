@@ -2463,8 +2463,9 @@ dependencies = [
 
 [[package]]
 name = "otodo"
-version = "0.1.21"
+version = "0.1.22"
 dependencies = [
+ "chrono",
  "rusqlite",
  "serde",
  "serde_json",

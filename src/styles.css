@@ -124,6 +124,20 @@ body.browser-mode {
   background: transparent;
 }
 
+.today-btn {
+  border: 1px solid var(--accent-mid);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.today-btn:hover {
+  background: rgba(47, 111, 106, 0.18);
+}
+
 .view-sep {
   font-size: 10px;
   color: rgba(0, 0, 0, 0.25);
@@ -1506,4 +1520,176 @@ input[type="checkbox"]:checked::after {
 .todo-skip:hover {
   background: rgba(0, 0, 0, 0.06);
   color: var(--ink-soft);
+}
+
+/* ====== 数据库恢复界面 ====== */
+.recovery-screen {
+  position: relative;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.recovery-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.recovery-close:hover {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--ink);
+}
+
+.recovery-panel {
+  width: min(560px, 100%);
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.recovery-label {
+  color: #a14a3a;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+}
+
+.recovery-panel h1 {
+  margin: 8px 0 12px;
+  font-size: 20px;
+  font-weight: 650;
+}
+
+.recovery-error {
+  margin: 0 0 18px;
+  color: var(--ink-soft);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.recovery-data-dir {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 18px;
+  color: var(--ink-faint);
+  font-size: var(--fs-xs);
+}
+
+.recovery-data-dir code {
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.035);
+  color: var(--ink);
+  font-family: Consolas, "Courier New", monospace;
+  user-select: text;
+}
+
+.recovery-retry {
+  padding: 7px 18px;
+  border: none;
+  border-radius: var(--radius);
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.recovery-retry:hover {
+  background: #265c58;
+}
+
+/* ====== 非阻塞错误提示 ====== */
+.error-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 200;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 9px 12px;
+  border: 1px solid rgba(161, 74, 58, 0.28);
+  border-radius: var(--radius);
+  background: rgba(255, 248, 246, 0.96);
+  color: #7f2f25;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
+.undo-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 201;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 9px 12px;
+  border: 1px solid var(--accent-mid);
+  border-radius: var(--radius);
+  background: rgba(247, 252, 251, 0.97);
+  color: var(--ink);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
+  font-size: var(--fs-sm);
+}
+
+.app:has(.undo-toast) > .error-toast {
+  bottom: 72px;
+}
+
+.collapsed-notices {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 48%;
+}
+
+.collapsed-notices .error-toast,
+.collapsed-notices .undo-toast {
+  position: static;
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 8px;
+  box-shadow: none;
+  line-height: 1.2;
+}
+.undo-toast span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.undo-toast button {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+:where(button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

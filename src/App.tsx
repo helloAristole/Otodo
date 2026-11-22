@@ -1,11 +1,39 @@
 import { useEffect, useLayoutEffect, useMemo, useState, useCallback, useRef } from "react";
-import { initDb, getTodos, addTodo, updateTodo, toggleTodo, deleteTodo, hideWindow, showWindow, reorderTodos, IS_TAURI, getPomodoro, togglePomodoro, resetPomodoro, setPomodoroDurations, IDLE_POMO, type PomoSnap } from "./api";
+import { initDb, getDataDir, getTodos, addTodo, updateTodo, toggleTodo, deleteTodo, restoreTodo, hideWindow, showWindow, reorderTodos, moveTodo, rollOverTodos, sendDueNotification, IS_TAURI, getPomodoro, togglePomodoro, resetPomodoro, setPomodoroDurations, IDLE_POMO, type PomoSnap } from "./api";
 import solarLunar from "solarlunar";
 import { zh as chrono } from "chrono-node";
 import type { Todo, RepeatVal } from "./types";
+import { getStartupScreen } from "./startupState";
+import {
+  appendSkipDate,
+  countRemainingTodosForDay,
+  matchesTodoOnDay as matchesRepeat,
+  todoDayKey,
+  todoDoneOnDay,
+} from "./todoLogic";
+import {
+  advanceStartupWindowState,
+  beginDeleteUndo,
+  expireDeleteUndo,
+  getPomodoroSnapshotUpdate,
+  getTodayNavigationState,
+  getTodoCheckboxLabel,
+  getUndoRescheduleDelay,
+  takeDeleteUndo,
+  type CalendarView,
+  type DeleteUndoState,
+  type StartupWindowSizeAction,
+} from "./desktopState";
+import {
+  collectNotificationCandidates,
+  getNotificationHistoryRetentionDay,
+  loadNotificationHistory,
+  pruneAndPersistNotificationHistory,
+  recordSuccessfulNotification,
+} from "./notificationLogic";
 
 // ---- 常量 ----
-type View = "day" | "week" | "month";
+type View = CalendarView;
 const WEEK_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const MONTH_HEAD = ["日", "一", "二", "三", "四", "五", "六"];
 const SETTINGS_KEY = "otodo.settings";
@@ -24,6 +52,8 @@ type AppSettings = {
   expandedH?: number;
   pomoFocusMin?: number;
   pomoBreakMin?: number;
+  dueReminders?: boolean;
+  notificationPrompted?: boolean;
 };
 
 function clampPomoMin(n: unknown, min: number, max: number, fallback: number): number {
@@ -59,6 +89,8 @@ function persistSettings(partial: AppSettings) {
             expandedH: next.expandedH ?? EXPANDED_H,
             pomoFocusMin: clampPomoMin(next.pomoFocusMin, 1, 180, 25),
             pomoBreakMin: clampPomoMin(next.pomoBreakMin, 1, 60, 5),
+            dueReminders: !!next.dueReminders,
+            notificationPrompted: !!next.notificationPrompted,
           },
         })
       )
@@ -93,6 +125,8 @@ function settingsFromRust(raw: Record<string, unknown>): AppSettings {
           : undefined,
     pomoFocusMin: clampPomoMin(raw.pomo_focus_min ?? raw.pomoFocusMin, 1, 180, 25),
     pomoBreakMin: clampPomoMin(raw.pomo_break_min ?? raw.pomoBreakMin, 1, 60, 5),
+    dueReminders: !!(raw.due_reminders ?? raw.dueReminders),
+    notificationPrompted: !!(raw.notification_prompted ?? raw.notificationPrompted),
   };
 }
 
@@ -159,53 +193,16 @@ function IconSearch() {
 
 // ---- 工具函数 ----
 function pad(n: number) { return String(n).padStart(2, "0"); }
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 function ymd(d: Date): string { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function addDays(d: Date, n: number): Date { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
 function startOfWeekMonday(d: Date): Date { const x = new Date(d); x.setHours(0, 0, 0, 0); const offset = (x.getDay() + 6) % 7; return addDays(x, -offset); }
 function isAllDay(t: Todo): boolean { return t.all_day || !t.due_at; }
-function todoDayKey(t: Todo): string {
-  if (t.due_at) return ymd(new Date(t.due_at));
-  if (t.due_date) return t.due_date;
-  // 无日期的历史待办：落在创建日，禁止回退成「今天」否则会每天跟到当日列
-  if (t.created_at) return ymd(new Date(t.created_at));
-  return ymd(new Date());
-}
-function isLeap(y: number): boolean { return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0; }
 function daysInMonth(dayKey: string): number {
   const [y, m] = dayKey.split("-").map(Number);
   return new Date(y, m, 0).getDate();
-}
-function todoDoneOnDay(t: Todo, dayKey: string): boolean {
-  if (t.repeat && t.repeat !== "none") return t.done_dates.split(" ").filter(Boolean).includes(dayKey);
-  return t.done;
-}
-function matchesRepeat(t: Todo, dayKey: string): boolean {
-  // 跳过单天（Bug 10：可单独跳过某次重复）
-  if (t.skip_dates && t.skip_dates.split(" ").filter(Boolean).includes(dayKey)) return false;
-  if (!t.repeat || t.repeat === "none") {
-    if (t.repeat_until && dayKey > t.repeat_until) return false;
-    return todoDayKey(t) === dayKey;
-  }
-  const base = t.due_date ? new Date(t.due_date + "T00:00:00") : t.due_at ? new Date(t.due_at) : new Date();
-  if (dayKey < ymd(base)) return false; // 不显示创建日之前
-  if (t.repeat_until && dayKey > t.repeat_until) return false; // 重复结束日期（Bug 10）
-  const d = new Date(dayKey + "T00:00:00");
-  switch (t.repeat) {
-    case "daily": return true;
-    case "weekly": return d.getDay() === base.getDay();
-    case "monthly": {
-      const target = Math.min(base.getDate(), daysInMonth(dayKey)); // 月末不足时顺延到最后一天（Bug 6）
-      return d.getDate() === target;
-    }
-    case "yearly": {
-      const baseDay = base.getDate();
-      const baseMonth = base.getMonth();
-      let targetDay = baseDay;
-      if (baseMonth === 1 && baseDay === 29 && !isLeap(d.getFullYear())) targetDay = 28; // 2/29 平年显示 2/28（Bug 6）
-      return d.getMonth() === baseMonth && d.getDate() === targetDay;
-    }
-    default: return todoDayKey(t) === dayKey;
-  }
 }
 
 // ---- 拖拽排序 helper ----
@@ -250,34 +247,45 @@ function formatPomo(ms: number): string {
 
 function usePomodoro() {
   const [snap, setSnap] = useState<PomoSnap>(IDLE_POMO);
+  const snapRef = useRef<PomoSnap>(IDLE_POMO);
+  const applySnapshot = useCallback((incoming: PomoSnap) => {
+    const accepted = getPomodoroSnapshotUpdate(snapRef.current, incoming);
+    snapRef.current = accepted;
+    setSnap(accepted);
+  }, []);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let active = true;
     (async () => {
       try {
         const s = await getPomodoro();
-        if (active) setSnap(s);
+        if (active) applySnapshot(s);
       } catch { /* ignore */ }
       if (!IS_TAURI) return;
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        unlisten = await listen<PomoSnap>("pomodoro-update", (e) => setSnap(e.payload));
+        const stop = await listen<PomoSnap>("pomodoro-update", (e) => applySnapshot(e.payload));
+        if (!active) {
+          stop();
+          return;
+        }
+        unlisten = stop;
       } catch { /* ignore */ }
     })();
     return () => {
       active = false;
       unlisten?.();
     };
-  }, []);
+  }, [applySnapshot]);
   const toggle = useCallback(async () => {
-    try { setSnap(await togglePomodoro()); } catch { /* ignore */ }
-  }, []);
+    try { applySnapshot(await togglePomodoro()); } catch { /* ignore */ }
+  }, [applySnapshot]);
   const reset = useCallback(async () => {
-    try { setSnap(await resetPomodoro()); } catch { /* ignore */ }
-  }, []);
+    try { applySnapshot(await resetPomodoro()); } catch { /* ignore */ }
+  }, [applySnapshot]);
   const applyDurations = useCallback(async (focusMin: number, breakMin: number) => {
-    try { setSnap(await setPomodoroDurations(focusMin, breakMin)); } catch { /* ignore */ }
-  }, []);
+    try { applySnapshot(await setPomodoroDurations(focusMin, breakMin)); } catch { /* ignore */ }
+  }, [applySnapshot]);
   return { snap, toggle, reset, applyDurations };
 }
 
@@ -391,6 +399,49 @@ export default function App() {
   );
   const [todos, setTodos] = useState<Todo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [initializationError, setInitializationError] = useState<string | null>(null);
+  const [dataDirectory, setDataDirectory] = useState("正在读取…");
+  const [initializationAttempt, setInitializationAttempt] = useState(0);
+  const databaseReadyRef = useRef(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const [undoDelete, setUndoDelete] = useState<DeleteUndoState | null>(null);
+  const undoTimerRef = useRef<number | null>(null);
+  const showError = useCallback((action: string, error: unknown) => {
+    setToast(`${action}失败：${errorMessage(error)}`);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, 4500);
+  }, []);
+  useEffect(() => () => {
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
+  }, []);
+  useEffect(() => {
+    if (!undoDelete) return;
+    const todoId = undoDelete.todo.id;
+    const expire = () => {
+      const remaining = getUndoRescheduleDelay(undoDelete, todoId, Date.now());
+      if (remaining !== null) {
+        undoTimerRef.current = window.setTimeout(expire, remaining);
+        return;
+      }
+      undoTimerRef.current = null;
+      setUndoDelete((current) => expireDeleteUndo(current, todoId, Date.now()));
+    };
+    undoTimerRef.current = window.setTimeout(
+      expire,
+      Math.max(0, undoDelete.expiresAt - Date.now()),
+    );
+    return () => {
+      if (undoTimerRef.current !== null) {
+        window.clearTimeout(undoTimerRef.current);
+        undoTimerRef.current = null;
+      }
+    };
+  }, [undoDelete]);
   const [collapsed, setCollapsed] = useState(() => !!saved.collapsed);
   const [locked, setLocked] = useState(() => !!saved.locked); // FR-16 锁定位置
   const [alwaysOnTop, setAlwaysOnTop] = useState(() => !!saved.alwaysOnTop); // 窗口置顶
@@ -399,13 +450,15 @@ export default function App() {
   ); // 未完成顺延到次日（默认开启）
   const [pomoFocusMin, setPomoFocusMin] = useState(() => clampPomoMin(saved.pomoFocusMin, 1, 180, 25));
   const [pomoBreakMin, setPomoBreakMin] = useState(() => clampPomoMin(saved.pomoBreakMin, 1, 60, 5));
+  const [dueReminders, setDueReminders] = useState(() => !!saved.dueReminders);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const dueRemindersRef = useRef(dueReminders);
+  const notificationPromptedRef = useRef(!!saved.notificationPrompted);
   const rollOverRef = useRef(rollOver); // 始终持有最新顺延开关，供定时器同步读取
   const expandedSizeRef = useRef({
     w: typeof saved.expandedW === "number" && saved.expandedW > 200 ? saved.expandedW : EXPANDED_W,
     h: typeof saved.expandedH === "number" && saved.expandedH > 120 ? saved.expandedH : EXPANDED_H,
   });
-  const sizeBootstrapped = useRef(false);
   const settingsReady = useRef(!IS_TAURI);
   const pomo = usePomodoro();
 
@@ -431,6 +484,8 @@ export default function App() {
   // 顺延：开启后，未完成的「不重复」待办会在跨天（due_date < 今天）时自动移到当天
   const lastRollRef = useRef<string>("");
   const runRollover = useCallback(async () => {
+    if (!databaseReadyRef.current) return;
+    if (!settingsReady.current) return;
     if (!rollOverRef.current) return;
     const today = ymd(new Date());
     if (lastRollRef.current === today) return; // 当天已顺延过，幂等
@@ -444,31 +499,45 @@ export default function App() {
           if (todoDayKey(t) >= today) return false; // 今天及以后不动
           return true;
         })
-        .map((t) => {
-          const mv = computeMoveDate(t, today); // 保留原时间，移到当天
-          return mv ? updateTodo(t.id, mv) : null;
-        })
-        .filter(Boolean) as Promise<void>[];
+        .map((t) => ({ id: t.id, ...computeMoveDate(t, today) }));
       if (moves.length) {
-        await Promise.all(moves);
+        await rollOverTodos(moves);
         await refresh();
       }
-    } catch (e) { console.warn("顺延失败:", e); }
-  }, [refresh]);
+    } catch (error) {
+      lastRollRef.current = "";
+      showError("自动顺延", error);
+    }
+  }, [refresh, showError]);
 
   useEffect(() => {
     let active = true;
     (async () => {
-      try { await initDb(); } catch (e) { console.warn("initDb 失败:", e); }
-      if (!active) return;
-      // 本地优先：先显示 SQLite 数据，不让网络状态阻塞首屏。
-      try { await refresh(); } catch (e) { console.warn("getTodos 失败:", e); }
-      if (!active) return;
-      setLoading(false);
-      try { await runRollover(); } catch (e) { console.warn("顺延失败:", e); }
+      databaseReadyRef.current = false;
+      setLoading(true);
+      setInitializationError(null);
+
+      const directory = await getDataDir().catch(() => "无法读取数据目录");
+      if (active) setDataDirectory(directory);
+
+      try {
+        await initDb();
+        if (!active) return;
+        // 初始化和首次读取必须整体成功，失败时不能把空数组误当成用户数据。
+        await refresh();
+        if (!active) return;
+        databaseReadyRef.current = true;
+        setLoading(false);
+        await runRollover();
+      } catch (error) {
+        if (!active) return;
+        databaseReadyRef.current = false;
+        setInitializationError(error instanceof Error ? error.message : String(error));
+        setLoading(false);
+      }
     })();
     return () => { active = false; };
-  }, [refresh, runRollover]);
+  }, [refresh, runRollover, initializationAttempt]);
 
   // 启动：先从 Rust 恢复锁定/置顶等，再显示窗口
   useEffect(() => {
@@ -490,19 +559,17 @@ export default function App() {
         if (s.view === "day" || s.view === "week" || s.view === "month") setView(s.view);
         if (typeof s.expandedW === "number" && s.expandedW > 200) expandedSizeRef.current.w = s.expandedW;
         if (typeof s.expandedH === "number" && s.expandedH > 120) expandedSizeRef.current.h = s.expandedH;
-        if (typeof s.pomoFocusMin === "number") setPomoFocusMin(s.pomoFocusMin);
-        if (typeof s.pomoBreakMin === "number") setPomoBreakMin(s.pomoBreakMin);
-        if (typeof s.pomoFocusMin === "number" || typeof s.pomoBreakMin === "number") {
-          void pomo.applyDurations(
-            s.pomoFocusMin ?? 25,
-            s.pomoBreakMin ?? 5,
-          );
+        if (typeof s.dueReminders === "boolean") {
+          setDueReminders(s.dueReminders);
+          dueRemindersRef.current = s.dueReminders;
         }
+        notificationPromptedRef.current = !!s.notificationPrompted;
         try {
           localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...loadSettings(), ...s }));
         } catch { /* ignore */ }
         settingsReady.current = true;
         persistSettings(s);
+        await runRollover();
       } catch {
         settingsReady.current = true;
         persistSettings({
@@ -515,57 +582,151 @@ export default function App() {
           expandedH: expandedSizeRef.current.h,
           pomoFocusMin,
           pomoBreakMin,
+          dueReminders,
+          notificationPrompted: notificationPromptedRef.current,
         });
+        await runRollover();
       }
       if (cancelled) return;
       await showWindow().catch(() => {});
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [runRollover]);
+
+  useEffect(() => {
+    if (typeof pomo.snap.focus_min === "number") {
+      setPomoFocusMin(pomo.snap.focus_min);
+    }
+    if (typeof pomo.snap.break_min === "number") {
+      setPomoBreakMin(pomo.snap.break_min);
+    }
+  }, [pomo.snap.focus_min, pomo.snap.break_min]);
 
   // todos 最新值的引用，供通知检查读取
   const todosRef = useRef(todos);
   useEffect(() => { todosRef.current = todos; }, [todos]);
 
-  // 到期提醒（Bug 9）：当天到期/即将到期且未完成 → 桌面通知（当天只提醒一次）
-  const notifiedToday = useRef<Set<string>>(new Set());
-  const checkDueNotifications = useCallback(async () => {
-    if (!IS_TAURI) return;
-    try {
-      const { sendNotification, isPermissionGranted, requestPermission } = await import("@tauri-apps/plugin-notification");
-      const perm = await isPermissionGranted();
-      if (!perm) {
-        const p = await requestPermission();
-        if (p !== "granted") { console.warn("[Otodo] 通知权限被拒绝:", p); return; }
-      }
-      const now = new Date();
-      const soon = new Date(now.getTime() + 30 * 60 * 1000);
-      for (const t of todosRef.current) {
-        if (t.deleted || t.done || !t.due_at) continue;
-        const dt = new Date(t.due_at);
-        const key = `${t.id}-${ymd(dt)}`;
-        if (dt >= now && dt <= soon && !notifiedToday.current.has(key)) {
-          notifiedToday.current.add(key);
-          const body = `${t.title} · ${dt.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
-          try {
-            await sendNotification({ title: "待办即将到期", body });
-          } catch (e) {
-            alert(`通知发送失败: ${e}`);
-          }
-        }
-      }
-    } catch (e) { alert(`[Otodo] 通知检查出错: ${e}`); }
+  const notifiedInstancesRef = useRef(
+    loadNotificationHistory(
+      localStorage,
+      getNotificationHistoryRetentionDay(new Date()),
+    ),
+  );
+  const notificationCheckRunningRef = useRef(false);
+
+  const persistReminderSetting = useCallback((
+    enabled: boolean,
+    prompted: boolean,
+  ) => {
+    dueRemindersRef.current = enabled;
+    notificationPromptedRef.current = prompted;
+    setDueReminders(enabled);
+    persistSettings({
+      dueReminders: enabled,
+      notificationPrompted: prompted,
+    });
   }, []);
 
-  // 数据变化后检查通知
-  useEffect(() => { checkDueNotifications(); }, [todos, checkDueNotifications]);
+  // 创建带时间待办时只自动尝试一次；设置开关属于用户明确操作，可再次尝试。
+  const requestDueReminderPermission = useCallback(async (explicitRetry: boolean) => {
+    if (!IS_TAURI) return;
+    if (!explicitRetry && notificationPromptedRef.current) return;
 
-  // 每 15 秒检查到期提醒
+    const prompted = true;
+    notificationPromptedRef.current = prompted;
+    persistSettings({ notificationPrompted: prompted });
+    try {
+      const { isPermissionGranted, requestPermission } =
+        await import("@tauri-apps/plugin-notification");
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        granted = (await requestPermission()) === "granted";
+      }
+      persistReminderSetting(granted, prompted);
+    } catch (error) {
+      persistReminderSetting(false, prompted);
+      showError("启用到期提醒", error);
+    }
+  }, [persistReminderSetting, showError]);
+
+  // 权限检查不会触发请求；发送成功后才写入持久化去重键。
+  const checkDueNotifications = useCallback(async (includeGracePeriod = false) => {
+    if (!IS_TAURI || !dueRemindersRef.current || notificationCheckRunningRef.current) return;
+    notificationCheckRunningRef.current = true;
+    try {
+      const { isPermissionGranted } =
+        await import("@tauri-apps/plugin-notification");
+      if (!(await isPermissionGranted())) return;
+
+      const now = new Date();
+      const cleanup = pruneAndPersistNotificationHistory(
+        notifiedInstancesRef.current,
+        getNotificationHistoryRetentionDay(now),
+        localStorage,
+      );
+      notifiedInstancesRef.current = cleanup.sentKeys;
+      if (!cleanup.persisted) {
+        showError("清理提醒记录", "本地存储不可用");
+      }
+
+      const candidates = collectNotificationCandidates(
+        todosRef.current,
+        now,
+        cleanup.sentKeys,
+        includeGracePeriod,
+      );
+      for (const candidate of candidates) {
+        try {
+          await sendDueNotification(
+            candidate.dueAt < now ? "待办刚刚到期" : "待办即将到期",
+            `${candidate.todo.title} · ${candidate.dueAt.toLocaleTimeString("zh-CN", {
+              hour: "2-digit",
+              minute: "2-digit",
+            })}`,
+          );
+        } catch (error) {
+          showError("发送通知", error);
+          continue;
+        }
+
+        const recorded = recordSuccessfulNotification(
+            notifiedInstancesRef.current,
+            candidate,
+            localStorage,
+          );
+        notifiedInstancesRef.current = recorded.sentKeys;
+        if (!recorded.persisted) {
+          showError(
+            "提醒已发送但记录保存",
+            "本地存储不可用，本次会话不会重复提醒",
+          );
+        }
+      }
+    } catch (error) {
+      showError("检查通知", error);
+    } finally {
+      notificationCheckRunningRef.current = false;
+    }
+  }, [showError]);
+
+  useEffect(() => { void checkDueNotifications(false); }, [todos, dueReminders, checkDueNotifications]);
+
   useEffect(() => {
     const id = setInterval(() => {
-      checkDueNotifications();
+      void checkDueNotifications(false);
     }, 15 * 1000);
-    return () => clearInterval(id);
+    const checkAfterResume = () => {
+      if (document.visibilityState === "visible") {
+        void checkDueNotifications(true);
+      }
+    };
+    document.addEventListener("visibilitychange", checkAfterResume);
+    window.addEventListener("focus", checkAfterResume);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", checkAfterResume);
+      window.removeEventListener("focus", checkAfterResume);
+    };
   }, [checkDueNotifications]);
 
   // 跨天：顺延未完成待办，并把仍停在「昨天」的焦点切到今天
@@ -621,27 +782,53 @@ export default function App() {
     });
   }, [alwaysOnTop, rollOver, collapsed, locked, view]);
 
-  // 收起只压高度、宽度跟展开窗口一致；启动首次展开不强制改尺寸
-  useEffect(() => {
-    (async () => {
-      if (!sizeBootstrapped.current) {
-        sizeBootstrapped.current = true;
-        if (!collapsed) return;
+  const startupScreen = getStartupScreen(loading, initializationError);
+  const startupWindowStateRef = useRef({
+    temporaryRecoveryExpanded: false,
+  });
+  const applyStartupWindowSize = useCallback(async (
+    action: StartupWindowSizeAction,
+  ) => {
+    if (!action) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const width = Math.max(MIN_WINDOW_W, expandedSizeRef.current.w);
+      if (action === "expand-temporary") {
+        await invoke("set_temporary_window_size", {
+          width,
+          height: expandedSizeRef.current.h,
+        });
+        return;
       }
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const w = Math.max(MIN_WINDOW_W, expandedSizeRef.current.w);
-        if (collapsed) {
-          await invoke("set_window_size", { width: w, height: COLLAPSED_H });
-        } else {
-          await invoke("set_window_size", {
-            width: w,
-            height: expandedSizeRef.current.h,
-          });
-        }
-      } catch { /* browser */ }
-    })();
-  }, [collapsed]);
+      await invoke("set_window_size", { width, height: COLLAPSED_H });
+    } catch { /* browser */ }
+  }, []);
+
+  // 明确保存 recovery 临时展开状态，使重试期间的 loading 不会丢失恢复上下文。
+  useEffect(() => {
+    const transition = advanceStartupWindowState(
+      startupWindowStateRef.current,
+      startupScreen,
+      collapsed,
+    );
+    startupWindowStateRef.current = transition.state;
+    void applyStartupWindowSize(transition.action);
+  }, [applyStartupWindowSize, collapsed, startupScreen]);
+
+  useEffect(() => {
+    if (startupScreen !== "recovery" || !collapsed) return;
+    const restoreRecoverySize = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!startupWindowStateRef.current.temporaryRecoveryExpanded) return;
+      void applyStartupWindowSize("expand-temporary");
+    };
+    document.addEventListener("visibilitychange", restoreRecoverySize);
+    window.addEventListener("focus", restoreRecoverySize);
+    return () => {
+      document.removeEventListener("visibilitychange", restoreRecoverySize);
+      window.removeEventListener("focus", restoreRecoverySize);
+    };
+  }, [applyStartupWindowSize, collapsed, startupScreen]);
 
   const persistExpandedSize = useCallback((w: number, h: number, nextCollapsed: boolean) => {
     expandedSizeRef.current = { w, h };
@@ -663,6 +850,10 @@ export default function App() {
       if (size[0] > 80 && size[1] > 80) {
         persistExpandedSize(size[0], size[1], true);
       }
+      await invoke("set_window_size", {
+        width: Math.max(MIN_WINDOW_W, expandedSizeRef.current.w),
+        height: COLLAPSED_H,
+      });
     } catch { /* browser */ }
     setCollapsed(true);
   }, [persistExpandedSize]);
@@ -674,6 +865,10 @@ export default function App() {
       if (size[0] > 80) {
         persistExpandedSize(size[0], expandedSizeRef.current.h, false);
       }
+      await invoke("set_window_size", {
+        width: Math.max(MIN_WINDOW_W, expandedSizeRef.current.w),
+        height: expandedSizeRef.current.h,
+      });
     } catch { /* browser */ }
     setCollapsed(false);
   }, [persistExpandedSize]);
@@ -688,12 +883,12 @@ export default function App() {
 
   useEffect(() => {
     const unlistens: Array<() => void> = [];
+    let active = true;
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         // 用 cursorRef 读取最新 cursor，避免闭包锁死在启动那天的坑（Bug 1）
-        unlistens.push(
-          await listen("tray-new-todo", () => {
+        const stop = await listen("tray-new-todo", () => {
             const day = ymd(cursorRef.current);
             setAddingDay(day);
             setNewTitle("");
@@ -701,23 +896,75 @@ export default function App() {
             setNewRepeat("none");
             setNewRepeatUntil(null);
             setTimeout(() => addInputRef.current?.focus(), 50);
-          })
-        );
+          });
+        if (!active) {
+          stop();
+          return;
+        }
+        unlistens.push(stop);
       } catch { /* browser */ }
     })();
-    return () => { unlistens.forEach((u) => u()); };
+    return () => {
+      active = false;
+      unlistens.forEach((u) => u());
+    };
   }, []);
 
-  const onToggle = async (t: Todo, dayKey?: string) => { const done = dayKey ? todoDoneOnDay(t, dayKey) : t.done; await toggleTodo(t.id, !done, dayKey); await refresh(); };
-  const onDelete = async (t: Todo) => { await deleteTodo(t.id); await refresh(); };
-  const onEdit = async (id: string, patch: Record<string, unknown>) => { await updateTodo(id, patch as any); await refresh(); };
+  const onToggle = async (t: Todo, dayKey?: string) => {
+    try {
+      const done = dayKey ? todoDoneOnDay(t, dayKey) : t.done;
+      await toggleTodo(t.id, !done, dayKey);
+      await refresh();
+    } catch (error) {
+      showError("更新完成状态", error);
+    }
+  };
+  const onDelete = async (t: Todo) => {
+    try {
+      await deleteTodo(t.id);
+      await refresh();
+      if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
+      const now = Date.now();
+      setUndoDelete((current) =>
+        beginDeleteUndo(current, { id: t.id, title: t.title }, now)
+      );
+    } catch (error) {
+      showError("删除待办", error);
+    }
+  };
+  const onUndoDelete = async () => {
+    const taken = takeDeleteUndo(undoDelete);
+    if (!taken) return;
+    setUndoDelete(taken.nextState);
+    if (undoTimerRef.current !== null) {
+      window.clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = null;
+    }
+    try {
+      await restoreTodo(taken.todo.id);
+      await refresh();
+    } catch (error) {
+      showError("撤销删除", error);
+    }
+  };
+  const onEdit = async (id: string, patch: Record<string, unknown>): Promise<boolean> => {
+    try {
+      await updateTodo(id, patch as any);
+      await refresh();
+      return true;
+    } catch (error) {
+      showError("保存待办", error);
+      return false;
+    }
+  };
   // 跳过单次重复：把当天加入 skip_dates（Bug 10）
-  const onSkip = async (t: Todo) => {
-    const day = ymd(new Date());
-    const set = (t.skip_dates ? t.skip_dates.split(" ").filter(Boolean) : [] as string[]);
-    if (!set.includes(day)) set.push(day);
-    await updateTodo(t.id, { skip_dates: set.join(" ") });
-    await refresh();
+  const onSkip = async (t: Todo, dayKey: string) => {
+    try {
+      await updateTodo(t.id, { skip_dates: appendSkipDate(t.skip_dates, dayKey) });
+      await refresh();
+    } catch (error) {
+      showError("跳过重复待办", error);
+    }
   };
 
   // ---- 卡片拖拽（列内重排序 / 周视图跨天移动）----
@@ -754,16 +1001,22 @@ export default function App() {
       const insertAt = idx < 0 ? targetList.length : idx;
       targetList.splice(insertAt, 0, dragged);
 
-      if (isCrossDay) {
-        const mv = computeMoveDate(dragged, targetDayKey);
-        await updateTodo(dragged.id, { due_at: mv.due_at, due_date: mv.due_date, all_day: mv.all_day });
+      const orders = targetList.map((t, i) => ({ id: t.id, sort_order: i }));
+      try {
+        if (isCrossDay) {
+          const mv = computeMoveDate(dragged, targetDayKey);
+          await moveTodo({ id: dragged.id, ...mv }, orders);
+        } else {
+          await reorderTodos(orders);
+        }
+        await refresh();
+      } catch (error) {
+        showError("移动待办", error);
+      } finally {
+        setDragTodo(null);
       }
-      // 一次调用完成整列重排，避免逐条串行请求（Bug 8）
-      await reorderTodos(targetList.map((t, i) => ({ id: t.id, sort_order: i })));
-      await refresh();
-      setDragTodo(null);
     },
-    [dragTodo, todos, refresh]
+    [dragTodo, todos, refresh, showError]
   );
 
   // ---- 新建 ----
@@ -820,13 +1073,20 @@ export default function App() {
         repeat: newRepeat,
         repeat_until: newRepeatUntil,
       });
+      if (dueAt) {
+        void requestDueReminderPermission(false);
+      }
     } catch (err) {
       console.error("[Otodo] 新建待办失败:", err);
-      alert(`新建失败: ${err instanceof Error ? err.message : String(err)}`);
+      showError("新建待办", err);
       return;
     }
     resetAddForm();
-    await refresh();
+    try {
+      await refresh();
+    } catch (error) {
+      showError("刷新待办", error);
+    }
   };
 
   // ---- 锁定位置 (FR-16) ----
@@ -865,6 +1125,11 @@ export default function App() {
   // 月视图
   const [monthYear, setMonthYear] = useState(() => ({ y: cursor.getFullYear(), m: cursor.getMonth() + 1 }));
   const monthGrid = useMemo(() => buildMonthGrid(monthYear.y, monthYear.m), [monthYear]);
+  const goToToday = () => {
+    const navigation = getTodayNavigationState(view, new Date());
+    setCursor(navigation.cursor);
+    setMonthYear(navigation.monthYear);
+  };
 
   const navLabel = (() => {
     if (view === "month") return `${monthYear.y}年${pad(monthYear.m)}月`;
@@ -899,6 +1164,39 @@ export default function App() {
     try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("drag_window"); } catch { /* browser */ }
   }, [locked]);
 
+  if (startupScreen === "loading") {
+    return (
+      <div className="app recovery-screen startup-loading-screen" onMouseDown={onDragStart}>
+        <button className="recovery-close" aria-label="关闭到托盘" onClick={() => hideWindow()}><IconClose /></button>
+        <div className="empty-hint">正在安全加载本地数据…</div>
+      </div>
+    );
+  }
+
+  if (startupScreen === "recovery") {
+    return (
+      <div className="app recovery-screen" onMouseDown={onDragStart}>
+        <button className="recovery-close" aria-label="关闭到托盘" onClick={() => hideWindow()}><IconClose /></button>
+        <div className="recovery-panel">
+          <div className="recovery-label">数据库启动失败</div>
+          <h1>为保护现有数据，Otodo 已停止加载</h1>
+          <p className="recovery-error">{initializationError}</p>
+          <div className="recovery-data-dir">
+            <span>数据目录</span>
+            <code>{dataDirectory}</code>
+          </div>
+          <button
+            type="button"
+            className="recovery-retry"
+            onClick={() => setInitializationAttempt((attempt) => attempt + 1)}
+          >
+            重试
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // ---- FR-18 收起态 ----
   if (collapsed) {
     return (
@@ -912,12 +1210,22 @@ export default function App() {
         onExpand={() => { void expandWindow(); }}
         onClose={() => hideWindow()}
         onDragStart={onDragStart}
+        toast={toast}
+        undoDelete={undoDelete}
+        onUndoDelete={onUndoDelete}
       />
     );
   }
 
   return (
     <div className="app">
+      {toast && <div className="error-toast" role="status" aria-live="polite">{toast}</div>}
+      {undoDelete && (
+        <div className="undo-toast" role="status" aria-live="polite">
+          <span>已删除“{undoDelete.todo.title}”</span>
+          <button type="button" onClick={() => { void onUndoDelete(); }}>撤销</button>
+        </div>
+      )}
       {/* === 顶栏 === */}
       <header className="topbar" onMouseDown={onDragStart}>
         <span className="topbar-brand">Otodo</span>
@@ -929,6 +1237,7 @@ export default function App() {
               type="button"
               className={`search-btn ${searchOpen || search ? "active" : ""}`}
               title="搜索"
+              aria-label="搜索待办"
               onClick={(e) => {
                 e.stopPropagation();
                 setSearchOpen((v) => {
@@ -955,15 +1264,18 @@ export default function App() {
               />
             )}
           </div>
-          <button className={`lock-btn ${locked ? "active" : ""}`} title={locked ? "解除锁定：可再次拖动窗口" : "锁定位置：禁止拖动窗口"} onClick={toggleLock}><IconLock locked={locked} /></button>
+          <button className={`lock-btn ${locked ? "active" : ""}`} aria-label={locked ? "解除窗口位置锁定" : "锁定窗口位置"} title={locked ? "解除锁定：可再次拖动窗口" : "锁定位置：禁止拖动窗口"} onClick={toggleLock}><IconLock locked={locked} /></button>
           <div className="settings-wrap">
-            <button className={`settings-btn ${settingsOpen ? "active" : ""}`} title="设置" onClick={(e) => { e.stopPropagation(); setSettingsOpen((v) => !v); }}><IconSettings /></button>
+            <button className={`settings-btn ${settingsOpen ? "active" : ""}`} aria-label="打开设置" title="设置" onClick={(e) => { e.stopPropagation(); setSettingsOpen((v) => !v); }}><IconSettings /></button>
             {settingsOpen && (
               <div className="settings-popover" onMouseDown={(e) => e.stopPropagation()}>
                 <div className="settings-row">
                   <span className="settings-label">窗口置顶</span>
                   <button
                     className={`toggle ${alwaysOnTop ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={alwaysOnTop}
+                    aria-label="窗口置顶"
                     onClick={() => setAlwaysOnTop((v) => !v)}
                   >
                     {alwaysOnTop ? "开" : "关"}
@@ -973,9 +1285,30 @@ export default function App() {
                   <span className="settings-label" title="未完成的「不重复」待办会在次日自动移到当天">未完成顺延</span>
                   <button
                     className={`toggle ${rollOver ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={rollOver}
+                    aria-label="未完成顺延"
                     onClick={toggleRollOver}
                   >
                     {rollOver ? "开" : "关"}
+                  </button>
+                </div>
+                <div className="settings-row">
+                  <span className="settings-label" title="仅提醒未来 30 分钟内到期的带时间待办">到期提醒</span>
+                  <button
+                    className={`toggle ${dueReminders ? "on" : ""}`}
+                    role="switch"
+                    aria-checked={dueReminders}
+                    aria-label="到期提醒"
+                    onClick={() => {
+                      if (dueReminders) {
+                        persistReminderSetting(false, notificationPromptedRef.current);
+                        return;
+                      }
+                      void requestDueReminderPermission(true);
+                    }}
+                  >
+                    {dueReminders ? "开" : "关"}
                   </button>
                 </div>
                 <div className="settings-row">
@@ -986,7 +1319,6 @@ export default function App() {
                     max={180}
                     onCommit={(n) => {
                       setPomoFocusMin(n);
-                      persistSettings({ pomoFocusMin: n, pomoBreakMin });
                       void pomo.applyDurations(n, pomoBreakMin);
                     }}
                   />
@@ -999,7 +1331,6 @@ export default function App() {
                     max={60}
                     onCommit={(n) => {
                       setPomoBreakMin(n);
-                      persistSettings({ pomoFocusMin, pomoBreakMin: n });
                       void pomo.applyDurations(pomoFocusMin, n);
                     }}
                   />
@@ -1018,8 +1349,9 @@ export default function App() {
               }}
             >月</button>
           </div>
-          <button className="collapse-btn" title="收起" onClick={() => { void collapseWindow(); }}>▴</button>
-          <button className="close-btn" title="关闭（最小化到托盘）" onClick={() => hideWindow()}><IconClose /></button>
+          <button className="today-btn" type="button" onClick={goToToday}>今天</button>
+          <button className="collapse-btn" aria-label="收起窗口" title="收起" onClick={() => { void collapseWindow(); }}>▴</button>
+          <button className="close-btn" aria-label="关闭到托盘" title="关闭（最小化到托盘）" onClick={() => hideWindow()}><IconClose /></button>
         </div>
       </header>
 
@@ -1049,7 +1381,7 @@ export default function App() {
         <>
           {/* 日期头行 */}
           <div className="date-row" onMouseDown={onDragStart}>
-            <button className="page-arrow page-arrow-left" onClick={() => stepWeek(-1)} onMouseDown={(e) => e.stopPropagation()}>‹</button>
+            <button className="page-arrow page-arrow-left" aria-label={view === "week" ? "上一周" : "前一天"} onClick={() => stepWeek(-1)} onMouseDown={(e) => e.stopPropagation()}>‹</button>
             <div className="date-grid" style={{ gridTemplateColumns: `repeat(${view === "week" ? 7 : 1}, 1fr)` }}>
               {(view === "week" ? weekDays : [cursor]).map((day) => {
                 const key = ymd(day);
@@ -1070,7 +1402,7 @@ export default function App() {
                 );
               })}
             </div>
-            <button className="page-arrow page-arrow-right" onClick={() => stepWeek(1)} onMouseDown={(e) => e.stopPropagation()}>›</button>
+            <button className="page-arrow page-arrow-right" aria-label={view === "week" ? "下一周" : "后一天"} onClick={() => stepWeek(1)} onMouseDown={(e) => e.stopPropagation()}>›</button>
           </div>
 
           {/* 内容区：阻止冒泡到窗口拖拽，保证双击添加可用 */}
@@ -1089,12 +1421,14 @@ export default function App() {
             <button
               className="page-arrow"
               title="上一年"
+              aria-label="上一年"
               onClick={() => stepMonth(-12)}
               onMouseDown={(e) => e.stopPropagation()}
             >«</button>
             <button
               className="page-arrow"
               title="上一月"
+              aria-label="上一月"
               onClick={() => stepMonth(-1)}
               onMouseDown={(e) => e.stopPropagation()}
             >‹</button>
@@ -1102,12 +1436,14 @@ export default function App() {
             <button
               className="page-arrow"
               title="下一月"
+              aria-label="下一月"
               onClick={() => stepMonth(1)}
               onMouseDown={(e) => e.stopPropagation()}
             >›</button>
             <button
               className="page-arrow"
               title="下一年"
+              aria-label="下一年"
               onClick={() => stepMonth(12)}
               onMouseDown={(e) => e.stopPropagation()}
             >»</button>
@@ -1135,7 +1471,7 @@ export default function App() {
                   onDoubleClick={() => { setCursor(day); setView("day"); }}
                   onClick={() => setCursor(day)}
                 >
-                  <button className="month-cell-add" title="在此日添加待办" onClick={(e) => { e.stopPropagation(); startAdd(key); }}>+</button>
+                  <button className="month-cell-add" aria-label={`在 ${key} 添加待办`} title="在此日添加待办" onClick={(e) => { e.stopPropagation(); startAdd(key); }}>+</button>
                   <div className="month-cell-header">
                     <span className="month-day-num">{day.getDate()}</span>
                     <span className={`month-lunar ${hasFest && !info.term ? "festival" : ""} ${info.term ? "term" : ""}`}>{displayText}</span>
@@ -1174,7 +1510,7 @@ const DAY_HOUR_H = 48;
 function DayContent({ day, todos, adding, newTitle, newNote, newHour, parsedPreview, addInputRef, onStartAdd, onTitleChange, onNoteChange, onCommit, onCancel, onToggle, onDelete, onEdit, onSkip, repeat, onRepeatChange, repeatUntil, onRepeatUntilChange, draggingId, onTodoDragStart, onTodoDrop }: {
   day: Date; todos: Todo[]; adding: boolean; newTitle: string; newNote: string; newHour: number | null; parsedPreview: string | null;
   addInputRef: React.RefObject<HTMLInputElement>; onStartAdd: (hour?: number | null) => void; onTitleChange: (v: string) => void; onNoteChange: (v: string) => void; onCommit: () => void; onCancel: () => void;
-  onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void; onEdit: (id: string, p: Record<string, unknown>) => void; onSkip: (t: Todo) => void;
+  onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void; onEdit: (id: string, p: Record<string, unknown>) => Promise<boolean>; onSkip: (t: Todo, dayKey: string) => void;
   repeat: RepeatVal; onRepeatChange: (v: RepeatVal) => void; repeatUntil: string | null; onRepeatUntilChange: (v: string | null) => void;
   draggingId: string | null; onTodoDragStart: (e: React.DragEvent, t: Todo, dayKey: string) => void; onTodoDrop: (targetDayKey: string, beforeId: string | null) => void;
 }) {
@@ -1340,7 +1676,8 @@ function DayContent({ day, todos, adding, newTitle, newNote, newHour, parsedPrev
    收起态横条（含实时时钟）
    ===================================================== */
 function CollapsedBar({
-  todos, locked, pomo, onTogglePomo, onResetPomo, onToggleLock, onExpand, onClose, onDragStart,
+  todos, locked, pomo, onTogglePomo, onResetPomo, onToggleLock, onExpand, onClose, onDragStart, toast,
+  undoDelete, onUndoDelete,
 }: {
   todos: Todo[];
   locked: boolean;
@@ -1351,6 +1688,9 @@ function CollapsedBar({
   onExpand: () => void;
   onClose: () => void;
   onDragStart: (e: React.MouseEvent) => void;
+  toast: string | null;
+  undoDelete: DeleteUndoState | null;
+  onUndoDelete: () => void;
 }) {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -1363,7 +1703,8 @@ function CollapsedBar({
   const info = lunarInfo(now.getFullYear(), now.getMonth() + 1, now.getDate());
   const displayText = info.term || info.festival || info.lFestival || info.day;
   const dow = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
-  const allCount = todos.filter((t) => !t.done).length;
+  const todayKey = ymd(now);
+  const remainingCount = countRemainingTodosForDay(todos, todayKey);
   const timeText = now.toLocaleTimeString("zh-CN", {
     hour: "2-digit",
     minute: "2-digit",
@@ -1372,20 +1713,32 @@ function CollapsedBar({
 
   return (
     <div className="app collapsed-bar" onMouseDown={onDragStart}>
+      {(toast || undoDelete) && (
+        <div className="collapsed-notices">
+          {toast && <div className="error-toast" role="status" aria-live="polite">{toast}</div>}
+          {undoDelete && (
+            <div className="undo-toast" role="status" aria-live="polite">
+              <span>已删除“{undoDelete.todo.title}”</span>
+              <button type="button" onClick={(event) => { event.stopPropagation(); onUndoDelete(); }}>撤销</button>
+            </div>
+          )}
+        </div>
+      )}
       <span className="collapsed-info">
-        {now.getMonth() + 1}月{now.getDate()}日 周{dow} · {displayText} · {timeText} · {allCount}个待办
+        {now.getMonth() + 1}月{now.getDate()}日 周{dow} · {displayText} · {timeText} · 今日剩余 {remainingCount} 项
       </span>
       <div className="collapsed-actions">
         <PomoChip snap={pomo} onToggle={onTogglePomo} onReset={onResetPomo} />
         <button
           className={`lock-btn mini ${locked ? "active" : ""}`}
+          aria-label={locked ? "解除窗口位置锁定" : "锁定窗口位置"}
           title={locked ? "解除锁定：可再次拖动窗口" : "锁定位置：禁止拖动窗口"}
           onClick={(e) => { e.stopPropagation(); onToggleLock(); }}
         >
           <IconLock locked={locked} />
         </button>
-        <button className="expand-btn" onClick={onExpand}>▾</button>
-        <button className="close-btn" title="关闭（最小化到托盘）" onClick={onClose}><IconClose /></button>
+        <button className="expand-btn" aria-label="展开窗口" onClick={onExpand}>▾</button>
+        <button className="close-btn" aria-label="关闭到托盘" title="关闭（最小化到托盘）" onClick={onClose}><IconClose /></button>
       </div>
     </div>
   );
@@ -1397,7 +1750,7 @@ function CollapsedBar({
 function WeekContent({ weekDays, todosOnDay, addingDay, newTitle, newNote, parsedPreview, addInputRef, startAdd, onTitleChange, onNoteChange, onCommit, onCancel, onToggle, onDelete, onEdit, onSkip, repeat, onRepeatChange, repeatUntil, onRepeatUntilChange, draggingId, onTodoDragStart, onTodoDrop }: {
   weekDays: Date[]; todosOnDay: (d: Date) => Todo[]; addingDay: string | null; newTitle: string; newNote: string; parsedPreview: string | null;
   addInputRef: React.RefObject<HTMLInputElement>; startAdd: (key: string, hour?: number | null) => void; onTitleChange: (v: string) => void; onNoteChange: (v: string) => void; onCommit: () => void; onCancel: () => void;
-  onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void; onEdit: (id: string, p: Record<string, unknown>) => void; onSkip: (t: Todo) => void;
+  onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void; onEdit: (id: string, p: Record<string, unknown>) => Promise<boolean>; onSkip: (t: Todo, dayKey: string) => void;
   repeat: RepeatVal; onRepeatChange: (v: RepeatVal) => void; repeatUntil: string | null; onRepeatUntilChange: (v: string | null) => void;
   draggingId: string | null; onTodoDragStart: (e: React.DragEvent, t: Todo, dayKey: string) => void; onTodoDrop: (targetDayKey: string, beforeId: string | null) => void;
 }) {
@@ -1442,7 +1795,7 @@ function WeekDayColumn({
   day: Date; list: Todo[]; isAdding: boolean; newTitle: string; parsedPreview: string | null;
   addInputRef: React.RefObject<HTMLInputElement>; startAdd: (key: string, hour?: number | null) => void;
   onTitleChange: (v: string) => void; onCommit: () => void; onCancel: () => void;
-  onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void; onEdit: (id: string, p: Record<string, unknown>) => void; onSkip: (t: Todo) => void;
+  onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void; onEdit: (id: string, p: Record<string, unknown>) => Promise<boolean>; onSkip: (t: Todo, dayKey: string) => void;
   repeat: RepeatVal; onRepeatChange: (v: RepeatVal) => void; repeatUntil: string | null; onRepeatUntilChange: (v: string | null) => void;
   draggingId: string | null; onTodoDragStart: (e: React.DragEvent, t: Todo, dayKey: string) => void; onTodoDrop: (targetDayKey: string, beforeId: string | null) => void;
 }) {
@@ -1609,7 +1962,7 @@ function AddForm({ inputRef, value, onChange, note, onNoteChange, onCommit, onCa
    ===================================================== */
 function TodoCard({ t, onToggle, onDelete, onEdit, onSkip, compact, dayKey, draggable, dragging, onDragStartTodo, onDropAt, hideTime }: {
   t: Todo; onToggle: (t: Todo, dayKey?: string) => void; onDelete: (t: Todo) => void;
-  onEdit: (id: string, patch: Record<string, unknown>) => void; onSkip?: (t: Todo) => void; compact?: boolean; dayKey?: string;
+  onEdit: (id: string, patch: Record<string, unknown>) => Promise<boolean>; onSkip?: (t: Todo, dayKey: string) => void; compact?: boolean; dayKey?: string;
   draggable?: boolean; dragging?: boolean; hideTime?: boolean;
   onDragStartTodo?: (e: React.DragEvent, t: Todo, dayKey: string) => void;
   onDropAt?: (beforeId: string | null) => void;
@@ -1631,14 +1984,18 @@ function TodoCard({ t, onToggle, onDelete, onEdit, onSkip, compact, dayKey, drag
     setEditTitle(t.title);
     setEditNote(t.note ?? "");
   };
-  const commitEdit = () => {
+  const commitEdit = async () => {
     const title = editTitle.trim();
     if (!title) { cancelEdit(); return; }
     const patch: Record<string, unknown> = {};
     if (title !== t.title) patch.title = title;
     if ((editNote || "") !== (t.note || "")) patch.note = editNote.trim();
-    if (Object.keys(patch).length) onEdit(t.id, patch);
-    setEditing(false);
+    if (Object.keys(patch).length === 0) {
+      setEditing(false);
+      return;
+    }
+    const saved = await onEdit(t.id, patch);
+    if (saved) setEditing(false);
   };
 
   return (
@@ -1650,12 +2007,18 @@ function TodoCard({ t, onToggle, onDelete, onEdit, onSkip, compact, dayKey, drag
       onDrop={draggable ? (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); onDropAt?.(t.id); } : undefined}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <input type="checkbox" checked={doneForDay} onChange={() => onToggle(t, dayKey)} onClick={(e) => e.stopPropagation()} />
+      <input
+        type="checkbox"
+        checked={doneForDay}
+        aria-label={getTodoCheckboxLabel(t.title, dayKey || todoDayKey(t), doneForDay)}
+        onChange={() => onToggle(t, dayKey)}
+        onClick={(e) => e.stopPropagation()}
+      />
       {editing ? (
         <div
           className="todo-edit-block"
           onBlur={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as Node)) commitEdit();
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) void commitEdit();
           }}
         >
           <input
@@ -1665,7 +2028,7 @@ function TodoCard({ t, onToggle, onDelete, onEdit, onSkip, compact, dayKey, drag
             value={editTitle}
             onChange={(e) => setEditTitle(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter") { e.preventDefault(); commitEdit(); }
+              if (e.key === "Enter") { e.preventDefault(); void commitEdit(); }
               if (e.key === "Escape") { e.preventDefault(); cancelEdit(); }
             }}
           />
@@ -1697,9 +2060,9 @@ function TodoCard({ t, onToggle, onDelete, onEdit, onSkip, compact, dayKey, drag
         </span>
       )}
       {t.repeat && t.repeat !== "none" && dayKey && onSkip && (
-        <button className="todo-skip" title="今天不提醒（跳过这次重复）" onClick={(e) => { e.stopPropagation(); onSkip(t); }}>跳过</button>
+        <button className="todo-skip" title="仅跳过当前卡片对应日期" onClick={(e) => { e.stopPropagation(); onSkip(t, dayKey); }}>跳过本次</button>
       )}
-      <button className="todo-del" onClick={() => onDelete(t)}>×</button>
+      <button className="todo-del" aria-label={`删除待办：${t.title}`} onClick={() => onDelete(t)}>×</button>
     </div>
   );
 }
