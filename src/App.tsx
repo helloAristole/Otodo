@@ -972,13 +972,12 @@ export default function App() {
 
   const onTodoDragStart = useCallback(
     (e: React.DragEvent, t: Todo, dayKey: string) => {
-      if (locked) { e.preventDefault(); return; }
       e.stopPropagation();
       setDragTodo({ id: t.id, dayKey });
       e.dataTransfer.effectAllowed = "move";
       try { e.dataTransfer.setData("text/plain", t.id); } catch { /* ignore */ }
     },
-    [locked]
+    []
   );
 
   const onTodoDrop = useCallback(

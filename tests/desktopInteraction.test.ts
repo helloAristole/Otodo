@@ -1,0 +1,19 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const appSource = readFileSync(resolve(repositoryRoot, "src", "App.tsx"), "utf8");
+
+test("window position lock does not disable todo card dragging", () => {
+  const handlerStart = appSource.indexOf("const onTodoDragStart");
+  const handlerEnd = appSource.indexOf("const onTodoDrop", handlerStart);
+
+  assert.notEqual(handlerStart, -1);
+  assert.ok(handlerEnd > handlerStart);
+
+  const dragStartHandler = appSource.slice(handlerStart, handlerEnd);
+  assert.doesNotMatch(dragStartHandler, /\blocked\b/);
+});

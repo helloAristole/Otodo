@@ -1,6 +1,6 @@
 [package]
 name = "otodo"
-version = "0.1.22"
+version = "0.1.23"
 description = "Otodo - 桌面日历待办"
 edition = "2021"
 
