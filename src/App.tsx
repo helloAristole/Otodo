@@ -1265,8 +1265,12 @@ export default function App() {
   };
 
   const navLabel = (() => {
-    if (view === "month") return `${monthYear.y}年${pad(monthYear.m)}月`;
-    return `${cursor.getFullYear()}年${pad(cursor.getMonth() + 1)}月`;
+    if (view === "month") {
+      const maxDay = daysInMonth(`${monthYear.y}-${pad(monthYear.m)}-01`);
+      const day = Math.min(cursor.getDate(), maxDay);
+      return `${monthYear.y}年${pad(monthYear.m)}月${pad(day)}日`;
+    }
+    return `${cursor.getFullYear()}年${pad(cursor.getMonth() + 1)}月${pad(cursor.getDate())}日`;
   })();
 
   const stepMonth = (dir: number) => {
@@ -1376,9 +1380,6 @@ export default function App() {
                 <p className="update-modal-warning">
                   确认后将下载并安装更新，安装时 Otodo 会自动退出并重新启动。
                 </p>
-                <div className="update-release-notes">
-                  {availableUpdate.body?.trim() || "本次更新暂无详细说明。"}
-                </div>
               </>
             )}
             {(updatePhase === "downloading" || updatePhase === "installing") && (

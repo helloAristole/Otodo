@@ -30,6 +30,22 @@ test("clicking the settings button again closes the panel", () => {
   assert.match(settingsButton, /setSettingsOpen\(\(v\) => !v\)/);
 });
 
+test("topbar title includes the selected day", () => {
+  assert.match(
+    appSource,
+    /\$\{cursor\.getFullYear\(\)\}年\$\{pad\(cursor\.getMonth\(\) \+ 1\)\}月\$\{pad\(cursor\.getDate\(\)\)\}日/,
+  );
+  assert.match(
+    appSource,
+    /\$\{monthYear\.y\}年\$\{pad\(monthYear\.m\)\}月\$\{pad\(day\)\}日/,
+  );
+});
+
+test("update dialog does not render release notes", () => {
+  assert.doesNotMatch(appSource, /update-release-notes/);
+  assert.doesNotMatch(appSource, /本次更新暂无详细说明/);
+});
+
 test("updates are checked only from the settings button", () => {
   const invocations = appSource.match(/\bcheckForUpdates\(\)/g) ?? [];
 
