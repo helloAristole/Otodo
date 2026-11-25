@@ -122,7 +122,10 @@ test("workflow uploads checksum to an explicit repository after generation", () 
   const generationPosition = workflow.indexOf(
     "scripts/create-release-checksums.ps1",
   );
-  const uploadPosition = workflow.indexOf("gh release upload");
+  const uploadPosition = workflow.indexOf(
+    "gh release upload",
+    generationPosition,
+  );
 
   assert.notEqual(generationPosition, -1);
   assert.ok(uploadPosition > generationPosition);
@@ -168,10 +171,17 @@ test("release workflow signs and validates updater assets before publishing", ()
   assert.match(workflow, /uploadUpdaterJson:\s*true/);
   assert.match(workflow, /uploadUpdaterSignatures:\s*true/);
 
+  const rewritePosition = workflow.indexOf("Rewrite updater manifest URLs");
   const validationPosition = workflow.indexOf("Validate updater release assets");
   const publishPosition = workflow.indexOf("Publish validated release");
+  assert.notEqual(rewritePosition, -1);
   assert.notEqual(validationPosition, -1);
+  assert.ok(validationPosition > rewritePosition);
   assert.ok(publishPosition > validationPosition);
+  assert.match(
+    workflow,
+    /https:\/\/github\.com\/\$env:REPOSITORY\/releases\/download\/\$env:GITHUB_REF_NAME/,
+  );
   assert.match(workflow, /latest\.json/);
   assert.match(workflow, /\.sig/);
 });

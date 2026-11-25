@@ -69,6 +69,64 @@ jobs:
           updaterJsonPreferNsis: true
           args: "--config src-tauri/tauri.release.conf.json -- --locked"
 
+      - name: Rewrite updater manifest URLs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $manifestDirectory = Join-Path $env:RUNNER_TEMP "otodo-updater-manifest"
+          New-Item -ItemType Directory -Path $manifestDirectory -Force | Out-Null
+          gh release download `
+            --repo $env:REPOSITORY `
+            $env:GITHUB_REF_NAME `
+            --pattern "latest.json" `
+            --dir $manifestDirectory `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法下载 updater 清单"
+          }
+
+          $assets = @(
+            gh release view `
+              --repo $env:REPOSITORY `
+              $env:GITHUB_REF_NAME `
+              --json assets `
+              --jq '.assets[].name'
+          )
+          $nsisAssets = @($assets | Where-Object { $_ -like "*-setup.exe" })
+          $msiAssets = @($assets | Where-Object { $_ -like "*.msi" })
+          if ($nsisAssets.Count -ne 1 -or $msiAssets.Count -ne 1) {
+            throw "无法唯一确定 updater 安装包"
+          }
+
+          $manifestPath = Join-Path $manifestDirectory "latest.json"
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+          $baseUrl = "https://github.com/$env:REPOSITORY/releases/download/$env:GITHUB_REF_NAME"
+          foreach ($platform in $manifest.platforms.PSObject.Properties) {
+            $assetName = if ($platform.Name -like "*-msi") {
+              $msiAssets[0]
+            } else {
+              $nsisAssets[0]
+            }
+            $platform.Value.url = "$baseUrl/$assetName"
+          }
+          $json = $manifest | ConvertTo-Json -Depth 10
+          [System.IO.File]::WriteAllText(
+            $manifestPath,
+            $json + "`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          gh release upload `
+            --repo $env:REPOSITORY `
+            $env:GITHUB_REF_NAME `
+            $manifestPath `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法上传修正后的 updater 清单"
+          }
+
       - name: Generate and validate Windows checksums
         shell: pwsh
         run: |
