@@ -18,6 +18,18 @@ test("window position lock does not disable todo card dragging", () => {
   assert.doesNotMatch(dragStartHandler, /\blocked\b/);
 });
 
+test("clicking the settings button again closes the panel", () => {
+  const buttonStart = appSource.indexOf('className={`settings-btn ${settingsOpen ? "active" : ""}`}');
+  const buttonEnd = appSource.indexOf("<IconSettings />", buttonStart);
+
+  assert.notEqual(buttonStart, -1);
+  assert.ok(buttonEnd > buttonStart);
+
+  const settingsButton = appSource.slice(buttonStart, buttonEnd);
+  assert.match(settingsButton, /onMouseDown=\{\(e\) => e\.stopPropagation\(\)\}/);
+  assert.match(settingsButton, /setSettingsOpen\(\(v\) => !v\)/);
+});
+
 test("updates are checked only from the settings button", () => {
   const invocations = appSource.match(/\bcheckForUpdates\(\)/g) ?? [];
 

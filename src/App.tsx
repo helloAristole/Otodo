@@ -1445,7 +1445,18 @@ export default function App() {
           </div>
           <button className={`lock-btn ${locked ? "active" : ""}`} aria-label={locked ? "解除窗口位置锁定" : "锁定窗口位置"} title={locked ? "解除锁定：可再次拖动窗口" : "锁定位置：禁止拖动窗口"} onClick={toggleLock}><IconLock locked={locked} /></button>
           <div className="settings-wrap">
-            <button className={`settings-btn ${settingsOpen ? "active" : ""}`} aria-label="打开设置" title="设置" onClick={(e) => { e.stopPropagation(); setSettingsOpen((v) => !v); }}><IconSettings /></button>
+            <button
+              className={`settings-btn ${settingsOpen ? "active" : ""}`}
+              aria-label={settingsOpen ? "关闭设置" : "打开设置"}
+              title="设置"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                setSettingsOpen((v) => !v);
+              }}
+            >
+              <IconSettings />
+            </button>
             {settingsOpen && (
               <div className="settings-popover" onMouseDown={(e) => e.stopPropagation()}>
                 <div className="settings-row">
