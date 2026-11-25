@@ -31,9 +31,21 @@ import {
   pruneAndPersistNotificationHistory,
   recordSuccessfulNotification,
 } from "./notificationLogic";
+import {
+  advanceUpdateDownload,
+  createUpdateDownload,
+  getUpdateProgressPercent,
+  type UpdateDownloadState,
+} from "./updateLogic";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 // ---- 常量 ----
 type View = CalendarView;
+type ToastMessage = {
+  text: string;
+  tone: "error" | "info";
+};
+type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "installing";
 const WEEK_LABELS = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 const MONTH_HEAD = ["日", "一", "二", "三", "四", "五", "六"];
 const SETTINGS_KEY = "otodo.settings";
@@ -353,6 +365,39 @@ function PomoChip({ snap, onToggle, onReset }: { snap: PomoSnap; onToggle: () =>
   );
 }
 
+function UpdateProgress({
+  phase,
+  download,
+}: {
+  phase: "downloading" | "installing";
+  download: UpdateDownloadState;
+}) {
+  const percent = getUpdateProgressPercent(download);
+  const label = phase === "installing"
+    ? "正在安装，应用即将重新启动…"
+    : percent === null
+      ? "正在下载安装包…"
+      : `正在下载… ${percent}%`;
+
+  return (
+    <div className="update-progress" role="status" aria-live="polite">
+      <div className="update-progress-label">{label}</div>
+      <div
+        className={`update-progress-track ${percent === null ? "indeterminate" : ""}`}
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent ?? undefined}
+      >
+        <div
+          className="update-progress-value"
+          style={percent === null ? undefined : { width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 /** FR-09 自然语句解析 */
 function parseNatural(input: string): { title: string; due_at: string | null; due_date: string | null } | null {
   const now = new Date();
@@ -403,18 +448,21 @@ export default function App() {
   const [dataDirectory, setDataDirectory] = useState("正在读取…");
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const databaseReadyRef = useRef(false);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const [undoDelete, setUndoDelete] = useState<DeleteUndoState | null>(null);
   const undoTimerRef = useRef<number | null>(null);
-  const showError = useCallback((action: string, error: unknown) => {
-    setToast(`${action}失败：${errorMessage(error)}`);
+  const showToast = useCallback((text: string, tone: ToastMessage["tone"]) => {
+    setToast({ text, tone });
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     toastTimerRef.current = window.setTimeout(() => {
       setToast(null);
       toastTimerRef.current = null;
     }, 4500);
   }, []);
+  const showError = useCallback((action: string, error: unknown) => {
+    showToast(`${action}失败：${errorMessage(error)}`, "error");
+  }, [showToast]);
   useEffect(() => () => {
     if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     if (undoTimerRef.current !== null) window.clearTimeout(undoTimerRef.current);
@@ -452,6 +500,12 @@ export default function App() {
   const [pomoBreakMin, setPomoBreakMin] = useState(() => clampPomoMin(saved.pomoBreakMin, 1, 60, 5));
   const [dueReminders, setDueReminders] = useState(() => !!saved.dueReminders);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>("idle");
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [updateDownload, setUpdateDownload] = useState<UpdateDownloadState>(
+    createUpdateDownload,
+  );
   const dueRemindersRef = useRef(dueReminders);
   const notificationPromptedRef = useRef(!!saved.notificationPrompted);
   const rollOverRef = useRef(rollOver); // 始终持有最新顺延开关，供定时器同步读取
@@ -461,6 +515,86 @@ export default function App() {
   });
   const settingsReady = useRef(!IS_TAURI);
   const pomo = usePomodoro();
+
+  useEffect(() => {
+    if (!IS_TAURI) {
+      setAppVersion("开发环境");
+      return;
+    }
+
+    void import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then(setAppVersion)
+      .catch((error) => showError("读取应用版本", error));
+  }, [showError]);
+
+  const checkForUpdates = useCallback(async () => {
+    if (updatePhase !== "idle") return;
+    if (!IS_TAURI) {
+      showToast("仅桌面应用支持检查更新", "info");
+      return;
+    }
+
+    setUpdatePhase("checking");
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check({ timeout: 15_000 });
+      if (!update) {
+        setUpdatePhase("idle");
+        showToast("当前已是最新版本", "info");
+        return;
+      }
+
+      setAvailableUpdate(update);
+      setUpdatePhase("available");
+      setSettingsOpen(false);
+    } catch (error) {
+      setUpdatePhase("idle");
+      showError("检查更新", error);
+    }
+  }, [showError, showToast, updatePhase]);
+
+  const cancelUpdate = useCallback(async () => {
+    if (!availableUpdate || updatePhase !== "available") return;
+
+    try {
+      await availableUpdate.close();
+    } catch {
+      // 关闭更新资源失败不影响继续使用当前版本。
+    }
+    setAvailableUpdate(null);
+    setUpdatePhase("idle");
+  }, [availableUpdate, updatePhase]);
+
+  const installAvailableUpdate = useCallback(async () => {
+    if (!availableUpdate || updatePhase !== "available") return;
+
+    setUpdateDownload(createUpdateDownload());
+    setUpdatePhase("downloading");
+    try {
+      await availableUpdate.downloadAndInstall(
+        (event) => {
+          setUpdateDownload((current) => advanceUpdateDownload(current, event));
+          if (event.event === "Finished") {
+            setUpdatePhase("installing");
+          }
+        },
+        { restartAfterInstall: true },
+      );
+
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (error) {
+      try {
+        await availableUpdate.close();
+      } catch {
+        // 保留原始更新错误。
+      }
+      setAvailableUpdate(null);
+      setUpdatePhase("idle");
+      showError("安装更新", error);
+    }
+  }, [availableUpdate, showError, updatePhase]);
 
   const [cursor, setCursor] = useState<Date>(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
   const cursorRef = useRef(cursor);
@@ -1218,11 +1352,57 @@ export default function App() {
 
   return (
     <div className="app">
-      {toast && <div className="error-toast" role="status" aria-live="polite">{toast}</div>}
+      {toast && <div className={`${toast.tone}-toast`} role="status" aria-live="polite">{toast.text}</div>}
       {undoDelete && (
         <div className="undo-toast" role="status" aria-live="polite">
           <span>已删除“{undoDelete.todo.title}”</span>
           <button type="button" onClick={() => { void onUndoDelete(); }}>撤销</button>
+        </div>
+      )}
+      {availableUpdate && (
+        <div className="update-modal-backdrop" role="presentation">
+          <section
+            className="update-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="update-modal-title"
+          >
+            <div className="update-modal-label">发现新版本</div>
+            <h2 id="update-modal-title">
+              v{availableUpdate.currentVersion} → v{availableUpdate.version}
+            </h2>
+            {updatePhase === "available" && (
+              <>
+                <p className="update-modal-warning">
+                  确认后将下载并安装更新，安装时 Otodo 会自动退出并重新启动。
+                </p>
+                <div className="update-release-notes">
+                  {availableUpdate.body?.trim() || "本次更新暂无详细说明。"}
+                </div>
+              </>
+            )}
+            {(updatePhase === "downloading" || updatePhase === "installing") && (
+              <UpdateProgress phase={updatePhase} download={updateDownload} />
+            )}
+            <div className="update-modal-actions">
+              <button
+                type="button"
+                className="update-cancel-btn"
+                disabled={updatePhase !== "available"}
+                onClick={() => { void cancelUpdate(); }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="update-confirm-btn"
+                disabled={updatePhase !== "available"}
+                onClick={() => { void installAvailableUpdate(); }}
+              >
+                {updatePhase === "available" ? "立即更新" : "正在更新…"}
+              </button>
+            </div>
+          </section>
         </div>
       )}
       {/* === 顶栏 === */}
@@ -1333,6 +1513,19 @@ export default function App() {
                       void pomo.applyDurations(pomoFocusMin, n);
                     }}
                   />
+                </div>
+                <div className="settings-row settings-update-row">
+                  <span className="settings-version">
+                    当前版本 {appVersion ? `v${appVersion}` : "读取中…"}
+                  </span>
+                  <button
+                    type="button"
+                    className="check-update-btn"
+                    disabled={updatePhase === "checking"}
+                    onClick={() => { void checkForUpdates(); }}
+                  >
+                    {updatePhase === "checking" ? "正在检查…" : "检查更新"}
+                  </button>
                 </div>
               </div>
             )}
@@ -1687,7 +1880,7 @@ function CollapsedBar({
   onExpand: () => void;
   onClose: () => void;
   onDragStart: (e: React.MouseEvent) => void;
-  toast: string | null;
+  toast: ToastMessage | null;
   undoDelete: DeleteUndoState | null;
   onUndoDelete: () => void;
 }) {
@@ -1714,7 +1907,7 @@ function CollapsedBar({
     <div className="app collapsed-bar" onMouseDown={onDragStart}>
       {(toast || undoDelete) && (
         <div className="collapsed-notices">
-          {toast && <div className="error-toast" role="status" aria-live="polite">{toast}</div>}
+          {toast && <div className={`${toast.tone}-toast`} role="status" aria-live="polite">{toast.text}</div>}
           {undoDelete && (
             <div className="undo-toast" role="status" aria-live="polite">
               <span>已删除“{undoDelete.todo.title}”</span>

@@ -56,13 +56,18 @@ jobs:
         uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Otodo ${{ github.ref_name }}"
           releaseBody: "Windows 安装包请从下方 Assets 下载。"
           releaseDraft: true
           prerelease: false
-          args: "-- --locked"
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+          updaterJsonPreferNsis: true
+          args: "--config src-tauri/tauri.release.conf.json -- --locked"
 
       - name: Generate and validate Windows checksums
         shell: pwsh
@@ -89,6 +94,38 @@ jobs:
             $env:GITHUB_REF_NAME `
             $checksumPath `
             --clobber
+
+      - name: Validate updater release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $assets = @(
+            gh release view `
+              --repo $env:REPOSITORY `
+              $env:GITHUB_REF_NAME `
+              --json assets `
+              --jq '.assets[].name'
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法读取草稿 Release 产物"
+          }
+
+          foreach ($requiredAsset in @("latest.json", "SHA256SUMS.txt")) {
+            if ($requiredAsset -notin $assets) {
+              throw "Release 缺少必要产物：$requiredAsset"
+            }
+          }
+          if (-not ($assets | Where-Object { $_ -like "*.sig" })) {
+            throw "Release 缺少更新签名文件：*.sig"
+          }
+          if (-not ($assets | Where-Object { $_ -like "*-setup.exe" })) {
+            throw "Release 缺少 NSIS 安装包"
+          }
+          if (-not ($assets | Where-Object { $_ -like "*.msi" })) {
+            throw "Release 缺少 MSI 安装包"
+          }
 
       - name: Publish validated release
         shell: pwsh

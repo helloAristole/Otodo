@@ -1,7 +1,7 @@
 {
   "name": "otodo",
   "private": true,
-  "version": "0.1.23",
+  "version": "0.1.24",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -19,6 +19,8 @@
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-autostart": "^2.5.1",
     "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.1",
     "chrono-node": "^2.10.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

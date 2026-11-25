@@ -17,3 +17,15 @@ test("window position lock does not disable todo card dragging", () => {
   const dragStartHandler = appSource.slice(handlerStart, handlerEnd);
   assert.doesNotMatch(dragStartHandler, /\blocked\b/);
 });
+
+test("updates are checked only from the settings button", () => {
+  const invocations = appSource.match(/\bcheckForUpdates\(\)/g) ?? [];
+
+  assert.equal(invocations.length, 1);
+  assert.match(
+    appSource,
+    /onClick=\{\(\) => \{ void checkForUpdates\(\); \}\}/,
+  );
+  assert.match(appSource, /"检查更新"/);
+  assert.match(appSource, /当前已是最新版本/);
+});
