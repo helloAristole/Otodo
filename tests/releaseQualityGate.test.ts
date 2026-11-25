@@ -170,6 +170,16 @@ test("release workflow signs and validates updater assets before publishing", ()
   assert.match(workflow, /updaterJsonPreferNsis:\s*true/);
   assert.match(workflow, /uploadUpdaterJson:\s*true/);
   assert.match(workflow, /uploadUpdaterSignatures:\s*true/);
+  assert.match(workflow, /release-notes\.txt/);
+  assert.match(workflow, /\$manifest\.notes = \$notes/);
+  assert.match(workflow, /--notes-file \$notesPath/);
+  assert.doesNotMatch(workflow, /Windows 安装包请从下方/);
+  const releaseNotes = readFileSync(
+    resolve(repositoryRoot, "release-notes.txt"),
+    "utf8",
+  ).trim();
+  assert.notEqual(releaseNotes, "");
+  assert.doesNotMatch(releaseNotes, /请从下方/);
 
   const rewritePosition = workflow.indexOf("Rewrite updater manifest URLs");
   const validationPosition = workflow.indexOf("Validate updater release assets");

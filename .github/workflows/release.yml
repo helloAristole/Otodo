@@ -52,6 +52,25 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --locked -- -D warnings
 
+      - name: Load release notes
+        id: release_notes
+        shell: pwsh
+        run: |
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "release-notes.txt"
+          if (-not (Test-Path -LiteralPath $notesPath -PathType Leaf)) {
+            throw "缺少 release-notes.txt"
+          }
+          $notes = (Get-Content -LiteralPath $notesPath -Raw -Encoding UTF8).Trim()
+          if ([string]::IsNullOrWhiteSpace($notes)) {
+            throw "release-notes.txt 不能为空"
+          }
+          if ($notes.Contains("请从下方")) {
+            throw "更新说明不能引导用户到发布页面下载"
+          }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "body<<OTODONOTES"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value $notes
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "OTODONOTES"
+
       - name: Build draft release
         uses: tauri-apps/tauri-action@944946e3e4cac6603d1fe8f514171e9ecd3c78aa # v1
         env:
@@ -61,7 +80,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Otodo ${{ github.ref_name }}"
-          releaseBody: "Windows 安装包请从下方 Assets 下载。"
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           uploadUpdaterJson: true
@@ -103,6 +122,9 @@ jobs:
           $manifestPath = Join-Path $manifestDirectory "latest.json"
           $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
             ConvertFrom-Json
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "release-notes.txt"
+          $notes = (Get-Content -LiteralPath $notesPath -Raw -Encoding UTF8).Trim()
+          $manifest.notes = $notes
           $baseUrl = "https://github.com/$env:REPOSITORY/releases/download/$env:GITHUB_REF_NAME"
           foreach ($platform in $manifest.platforms.PSObject.Properties) {
             $assetName = if ($platform.Name -like "*-msi") {
@@ -191,7 +213,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          $notesPath = Join-Path $env:GITHUB_WORKSPACE "release-notes.txt"
           gh release edit `
             --repo $env:REPOSITORY `
             $env:GITHUB_REF_NAME `
+            --notes-file $notesPath `
             --draft=false
